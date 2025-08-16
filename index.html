@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>4K AI Image Upscaler (Browser-only)</title>
+  <meta name="description" content="Free, browser-only AI upscaler using UpscalerJS (ESRGAN 4x). Host on GitHub Pages." />
+  <style>
+    :root { --bg:#0b0b0f; --panel:#14141a; --text:#e8e8f0; --muted:#9aa0aa; --accent:#7c5cff; }
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(180deg,#0b0b0f, #0e0e15 40%, #12121a);color:var(--text);font:16px ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    .wrap{max-width:1100px;margin:40px auto;padding:0 20px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:22px}
+    h1{font-size:clamp(22px,3.6vw,36px);margin:0;letter-spacing:.3px}
+    .card{background:rgba(20,20,26,.92);border:1px solid rgba(255,255,255,.06);box-shadow:0 10px 30px rgba(0,0,0,.4);border-radius:20px;padding:18px}
+    .grid{display:grid;grid-template-columns:1fr;gap:16px}
+    @media (min-width: 900px){.grid{grid-template-columns:1.1fr .9fr}}
+    button,label.button{appearance:none;border:0;border-radius:12px;background:linear-gradient(180deg,#8c76ff,#6d53ff);color:white;padding:12px 16px;font-weight:700;cursor:pointer;box-shadow:0 6px 18px rgba(124,92,255,.35);transition:.2s transform,.2s opacity}
+    button:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
+    .ghost{background:#232331}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .hint{color:var(--muted);font-size:13px}
+    .preview{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .pane{background:#0e0e15;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:10px;min-height:220px;display:flex;align-items:center;justify-content:center;position:relative}
+    .pane h3{position:absolute;top:8px;left:12px;margin:0;font-size:12px;color:#b8bfd0;font-weight:600;letter-spacing:.3px}
+    img,canvas{max-width:100%;height:auto;border-radius:10px}
+    input[type="range"]{width:180px}
+    .bar{height:10px;background:#23233a;border-radius:20px;overflow:hidden}
+    .bar > span{display:block;height:100%;width:0;background:linear-gradient(90deg,#7c5cff,#5ad7ff);transition:width .15s}
+    footer{opacity:.8;margin-top:18px;font-size:12.5px}
+    .drop{border:1.8px dashed #3b3b55;border-radius:14px;padding:16px;text-align:center}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-thick@latest/dist/umd/4x.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/upscaler@latest/dist/browser/umd/upscaler.min.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>4K AI Image Upscaler (Free • Browser-only)</h1>
+    </header>
+
+    <div class="grid card">
+      <div>
+        <div class="drop" id="drop">
+          <p><strong>Drop an image</strong> here or</p>
+          <label class="button" for="file">Choose file</label>
+          <input id="file" type="file" accept="image/*" hidden />
+          <p class="hint">PNG / JPG / WEBP • max ~25 MP recommended</p>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <label>Target long edge: <strong id="targetLabel">3840 px (4K)</strong></label>
+          <input id="target" type="range" min="1920" max="7680" step="120" value="3840" />
+          <button id="go" disabled>Upscale to Target</button>
+          <button id="download" class="ghost" disabled>Download</button>
+        </div>
+        <div class="row hint">
+          <span>Backend: <code id="backend">detecting…</code></span>
+          <span>•</span>
+          <span>Model: ESRGAN-Thick 4×</span>
+          <span>•</span>
+          <span>Patch size: <code id="patchSize">128</code> | Padding: <code id="padding">8</code></span>
+        </div>
+        <div class="bar" style="margin-top:10px"><span id="progress"></span></div>
+      </div>
+      <div class="preview">
+        <div class="pane"><h3>Original</h3><img id="srcImg" alt="original" /></div>
+        <div class="pane"><h3>Upscaled</h3><canvas id="out" aria-label="upscaled"></canvas></div>
+      </div>
+    </div>
+
+    <footer class="hint">
+      <p>Runs 100% in your browser using <em>UpscalerJS</em> + <em>TensorFlow.js</em>. No server, no cost.</p>
+    </footer>
+  </div>
+
+<script>
+(function(){
+  const fileInput = document.getElementById('file');
+  const drop = document.getElementById('drop');
+  const srcImg = document.getElementById('srcImg');
+  const out = document.getElementById('out');
+  const go = document.getElementById('go');
+  const downloadBtn = document.getElementById('download');
+  const progressEl = document.getElementById('progress');
+  const targetRange = document.getElementById('target');
+  const targetLabel = document.getElementById('targetLabel');
+  const backendEl = document.getElementById('backend');
+
+  tf.ready().then(async () => {
+    try {
+      if (tf.engine().registryFactory['webgpu']) await tf.setBackend('webgpu');
+      else if (tf.engine().registryFactory['webgl']) await tf.setBackend('webgl');
+      else await tf.setBackend('cpu');
+    } catch(e){}
+    backendEl.textContent = tf.getBackend();
+  });
+
+  const upscaler = new Upscaler({
+    model: ESRGANThick4x,
+  });
+
+  function setTargetLabel(){
+    targetLabel.textContent = targetRange.value + ' px (long edge)';
+  }
+  setTargetLabel();
+  targetRange.addEventListener('input', setTargetLabel);
+
+  function enableUI(hasImage){
+    go.disabled = !hasImage;
+    downloadBtn.disabled = true;
+  }
+
+  function readFile(file){
+    return new Promise((res, rej) => {
+      const reader = new FileReader();
+      reader.onerror = rej;
+      reader.onload = () => res(reader.result);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function drawToCanvas(img){
+    const ctx = out.getContext('2d');
+    out.width = img.width;
+    out.height = img.height;
+    ctx.drawImage(img, 0, 0);
+  }
+
+  async function upscaleToTarget(){
+    const targetLong = parseInt(targetRange.value, 10);
+    const img = document.createElement('img');
+    img.src = srcImg.src;
+    await img.decode();
+
+    let tmp = img;
+
+    async function upscaleOnce(element){
+      const upscaled = await upscaler.upscale(element, {
+        patchSize: 128,
+        padding: 8,
+        progress: (fraction) => { progressEl.style.width = (fraction*100).toFixed(1)+'%'; },
+        output: 'tensor',
+      });
+      const [h, w] = upscaled.shape.slice(0,2);
+      const data = await upscaled.data();
+      const imageData = new ImageData(new Uint8ClampedArray(data), w, h);
+      const bmp = await createImageBitmap(imageData);
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(bmp, 0, 0);
+      upscaled.dispose();
+      return c;
+    }
+
+    while (Math.max(tmp.width, tmp.height) < targetLong){
+      tmp = await upscaleOnce(tmp);
+    }
+
+    const long = Math.max(tmp.width, tmp.height);
+    const ratio = targetLong / long;
+    let finalW = Math.round(tmp.width * Math.min(1, ratio));
+    let finalH = Math.round(tmp.height * Math.min(1, ratio));
+
+    const ctx = out.getContext('2d');
+    out.width = finalW; out.height = finalH;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(tmp, 0, 0, finalW, finalH);
+
+    downloadBtn.disabled = false;
+    progressEl.style.width = '100%';
+  }
+
+  async function handleFile(file){
+    const dataUrl = await readFile(file);
+    srcImg.src = dataUrl;
+    await srcImg.decode();
+    drawToCanvas(srcImg);
+    enableUI(true);
+    progressEl.style.width = '0%';
+  }
+
+  fileInput.addEventListener('change', e => {
+    if (e.target.files && e.target.files[0]) handleFile(e.target.files[0]);
+  });
+
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.opacity = .9; });
+  drop.addEventListener('dragleave', () => drop.style.opacity = 1);
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+
+  go.addEventListener('click', () => upscaleToTarget().catch(err => alert(err.message)));
+
+  downloadBtn.addEventListener('click', () => {
+    out.toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'upscaled.png';
+      a.click();
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  });
+
+})();
+</script>
+</body>
+</html>
